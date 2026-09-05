@@ -1,4 +1,4 @@
-# BtCodecController (LSPosed)
+# BtCodecController (LSPosed) v0.2
 
 针对 Redmi K30 Pro 移植 ColorOS 16 的个人测试模块。
 
@@ -84,3 +84,28 @@ LHDC V3 failed
 ## 说明
 
 LHDC V3 在当前设备的运行日志中存在于 LocalCapabilities，但此前不在当前耳机的 SelectableCapabilities 中，因此 V3 属于实验选项。模块会真实尝试并读回确认，不会把“调用成功”误报成“切换成功”。
+
+
+## v0.2 修复
+
+v0.1 会直接把 capability 中的原始 `BluetoothCodecConfig` 传给
+`A2dpService.setCodecConfigPreference()`。
+
+在目标 ROM 中观察到的优先级大致是：
+
+- LHDC V5: 9002
+- AAC: 2001
+- SBC: 1001
+
+Android A2DP 的选择逻辑会比较 requested codec 与所有 selectable codec 的 priority，
+所以 v0.1 选择 AAC/SBC 时，LHDC V5 仍然优先，表现就是“只有 V5 能切换”。
+
+v0.2：
+- 动态复制目标 Codec；
+- 将本次请求 priority 提升为系统 `CODEC_PRIORITY_HIGHEST`；
+- 保留 sample rate / bits / channel / codecSpecific1~4 / extended codec type；
+- AAC/SBC/V5 走正常 A2dpService API；
+- V3 如果只存在 LocalCapabilities、不在 SelectableCapabilities：
+  - 仅在用户明确选择 V3 时做一次 experimental native preference；
+  - 读回实际 Codec；
+  - 失败立即回退上一次成功项 / AAC / SBC。

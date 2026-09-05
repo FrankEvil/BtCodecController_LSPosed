@@ -175,6 +175,20 @@ public final class BtCodecModule extends XposedModule {
                 return;
             }
 
+            if (Contract.LHDC_V3.equals(cfg.desired) && !catalog.v3Selectable) {
+                // V3 exists only in LocalCapabilities on this ROM. The normal
+                // A2dpService API rejects non-selectable codecs. Try the native
+                // preference path once, then read back and fall back on failure.
+                boolean dispatched = tryNativeCodecPreference(service, device, target);
+                if (!dispatched) {
+                    failV3AndFallback(service, device, cfg, catalog,
+                            "V3 is local-only and native dispatch unavailable");
+                    return;
+                }
+                handler.postDelayed(() -> confirm(service, device, cfg), 1600);
+                return;
+            }
+
             setCodec(service, device, target);
             handler.postDelayed(() -> confirm(service, device, cfg), 1300);
         } catch (Throwable t) {
@@ -300,19 +314,140 @@ public final class BtCodecModule extends XposedModule {
     }
 
     private void setCodec(Object service, BluetoothDevice d, Object codec) throws Exception {
+        Object forced = cloneWithHighestPriority(codec);
+        Log.i(TAG, "request codec: " + forced);
+
         for (Method m : service.getClass().getMethods()) {
             if (!"setCodecConfigPreference".equals(m.getName()) || m.getParameterCount() != 2) continue;
             m.setAccessible(true);
-            m.invoke(service, d, codec);
+            m.invoke(service, d, forced);
             return;
         }
         for (Method m : service.getClass().getDeclaredMethods()) {
             if (!"setCodecConfigPreference".equals(m.getName()) || m.getParameterCount() != 2) continue;
             m.setAccessible(true);
-            m.invoke(service, d, codec);
+            m.invoke(service, d, forced);
             return;
         }
         throw new NoSuchMethodException("setCodecConfigPreference");
+    }
+
+    /**
+     * A2dpService does not mean "pick exactly this codec" when the requested
+     * BluetoothCodecConfig still carries its normal priority. It compares that
+     * priority against every selectable codec. On the target ROM LHDC V5 has
+     * priority 9002, AAC 2001 and SBC 1001, so passing the capability object
+     * unchanged makes LHDC win again.
+     *
+     * Build a new config with CODEC_PRIORITY_HIGHEST while preserving all
+     * feeding and vendor-specific fields.
+     */
+    private Object cloneWithHighestPriority(Object codec) throws Exception {
+        if (codec == null) return null;
+
+        Class<?> cfgClass = Class.forName("android.bluetooth.BluetoothCodecConfig", false, cl);
+        Class<?> builderClass = Class.forName(
+                "android.bluetooth.BluetoothCodecConfig$Builder", false, cl);
+        Object b = builderClass.getDeclaredConstructor().newInstance();
+
+        Object extType = noArg(codec, "getExtendedCodecType");
+        if (extType != null) {
+            tryInvokeBuilder(b, "setExtendedCodecType", extType);
+        } else {
+            tryInvokeBuilder(b, "setCodecType", intVal(codec, "getCodecType", -1));
+        }
+
+        int highest = 1000000;
+        try {
+            highest = cfgClass.getField("CODEC_PRIORITY_HIGHEST").getInt(null);
+        } catch (Throwable ignored) {}
+
+        tryInvokeBuilder(b, "setCodecPriority", highest);
+        tryInvokeBuilder(b, "setSampleRate", intVal(codec, "getSampleRate", 0));
+        tryInvokeBuilder(b, "setBitsPerSample", intVal(codec, "getBitsPerSample", 0));
+        tryInvokeBuilder(b, "setChannelMode", intVal(codec, "getChannelMode", 0));
+        tryInvokeBuilder(b, "setCodecSpecific1", longVal(codec, "getCodecSpecific1", 0));
+        tryInvokeBuilder(b, "setCodecSpecific2", longVal(codec, "getCodecSpecific2", 0));
+        tryInvokeBuilder(b, "setCodecSpecific3", longVal(codec, "getCodecSpecific3", 0));
+        tryInvokeBuilder(b, "setCodecSpecific4", longVal(codec, "getCodecSpecific4", 0));
+
+        Method build = builderClass.getMethod("build");
+        return build.invoke(b);
+    }
+
+    private static void tryInvokeBuilder(Object builder, String methodName, Object value)
+            throws Exception {
+        Method best = null;
+        for (Method m : builder.getClass().getMethods()) {
+            if (!m.getName().equals(methodName) || m.getParameterCount() != 1) continue;
+            Class<?> p = m.getParameterTypes()[0];
+            if (value instanceof Integer && (p == int.class || p == Integer.class)) {
+                best = m; break;
+            }
+            if (value instanceof Long && (p == long.class || p == Long.class)) {
+                best = m; break;
+            }
+            if (value != null && p.isAssignableFrom(value.getClass())) {
+                best = m; break;
+            }
+        }
+        if (best != null) {
+            best.setAccessible(true);
+            best.invoke(builder, value);
+        }
+    }
+
+    private boolean tryNativeCodecPreference(
+            Object service, BluetoothDevice device, Object codec) {
+        try {
+            Object codecManager = null;
+            Class<?> c = service.getClass();
+            while (c != null && codecManager == null) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (f.getName().toLowerCase(Locale.ROOT).contains("codec")
+                            && f.getType().getName().contains("A2dpCodecConfig")) {
+                        f.setAccessible(true);
+                        codecManager = f.get(service);
+                        if (codecManager != null) break;
+                    }
+                }
+                c = c.getSuperclass();
+            }
+            if (codecManager == null) return false;
+
+            Object nativeIf = null;
+            c = codecManager.getClass();
+            while (c != null && nativeIf == null) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (f.getType().getName().contains("A2dpNativeInterface")
+                            || f.getName().toLowerCase(Locale.ROOT).contains("nativeinterface")) {
+                        f.setAccessible(true);
+                        nativeIf = f.get(codecManager);
+                        if (nativeIf != null) break;
+                    }
+                }
+                c = c.getSuperclass();
+            }
+            if (nativeIf == null) return false;
+
+            Object forced = cloneWithHighestPriority(codec);
+            Class<?> cfgClass = Class.forName(
+                    "android.bluetooth.BluetoothCodecConfig", false, cl);
+            Object arr = Array.newInstance(cfgClass, 1);
+            Array.set(arr, 0, forced);
+
+            for (Method m : nativeIf.getClass().getDeclaredMethods()) {
+                if (!"setCodecConfigPreference".equals(m.getName())
+                        || m.getParameterCount() != 2) continue;
+                m.setAccessible(true);
+                m.invoke(nativeIf, device, arr);
+                Log.w(TAG, "experimental native V3 preference dispatched: " + forced);
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "tryNativeCodecPreference", t);
+        }
+        return false;
     }
 
     private Object invokeNamed(Object obj, String name) throws Exception {
@@ -493,14 +628,18 @@ public final class BtCodecModule extends XposedModule {
         Object v3;
         int v5Type = -1;
         int v3Type = -1;
+        boolean v5Selectable;
+        boolean v3Selectable;
         Object current;
 
         static Catalog fromStatus(Object status) {
             Catalog c = new Catalog();
             c.current = noArg(status, "getCodecConfig");
 
+            Map<Integer, Desc> selectable = new LinkedHashMap<>();
             Map<Integer, Desc> unique = new LinkedHashMap<>();
-            add(unique, noArg(status, "getCodecsSelectableCapabilities"));
+            add(selectable, noArg(status, "getCodecsSelectableCapabilities"));
+            unique.putAll(selectable);
             add(unique, noArg(status, "getCodecsLocalCapabilities"));
 
             List<Desc> lhdc = new ArrayList<>();
@@ -529,12 +668,14 @@ public final class BtCodecModule extends XposedModule {
             if (explicit != null) {
                 c.v5 = explicit.config;
                 c.v5Type = explicit.type;
+                c.v5Selectable = selectable.containsKey(explicit.type);
             }
 
             for (Desc d : lhdc) {
                 if (explicit == null || d.type != explicit.type) {
                     c.v3 = d.config;
                     c.v3Type = d.type;
+                    c.v3Selectable = selectable.containsKey(d.type);
                     break;
                 }
             }
