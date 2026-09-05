@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +26,10 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Build release APK
-        run: gradle :app:assembleRelease --stacktrace
+      - name: Build APK
+        run: gradle :app:assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: BtCodecController-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/debug/*.apk
