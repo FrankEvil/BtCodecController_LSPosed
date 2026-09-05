@@ -1,0 +1,23 @@
+这是完整源码工程，不是 APK。
+
+当前生成环境没有 Android SDK / Gradle 二进制，并且当前容器无法联网下载 Android 构建工具，
+所以这里不能诚实地产出一个经过编译验证的可安装 APK。
+
+最省事的两种构建方式：
+
+A. Android Studio
+1. JDK 17
+2. SDK Platform 36
+3. 打开项目并 Sync
+4. Build > Build APK(s)
+
+B. GitHub Actions
+项目已附带 .github/workflows/build-apk.yml。
+把源码推到 GitHub 后进入 Actions -> Build APK -> Run workflow。
+完成后下载 artifact: BtCodecController-apk。
+
+本地命令行：
+gradle :app:assembleRelease
+
+产物：
+app/build/outputs/apk/release/app-release.apk
